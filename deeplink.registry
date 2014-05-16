@@ -1,0 +1,82 @@
+<?php
+/**
+ * @file
+ * Deep link - Allow direct access to a specific item of content under certain circumstances.
+ */
+
+/**
+ * Implementation of hook_perm().
+ */
+function _deeplink_permission() {
+  $perms = array();
+  foreach (controls_get('deeplinkers') as $name => $deeplinker) {
+    $keyname = t(DEEPLINK_PERM_TEXT, array('!dlink' => $deeplinker['title']));
+    $perms[$keyname]['title'] = $keyname;
+  }
+  return $perms;
+}
+
+/**
+ * Implementation of hook_menu().
+ */
+function _deeplink_menu() {
+  $items = array();
+  $default_uri = variable_get(DEEPLINK_DEFAULT_LINK, 'deeplink');
+
+  // Define all deeplink URIs for all content types defined in Controls
+  $uris = deeplink_get_base_uri(NULL, TRUE);
+  foreach ($uris as $ctype => $options) {
+    $uri = $options['uri'];
+    $items[$uri . '/%deeplink'] = array(
+      'title callback' => 'deeplink_title',
+      'title arguments' => array(1),
+      'page callback' => 'deeplink',
+      'page arguments' => array(1),
+      'access callback' => 'deeplink_access',
+      'access arguments' => array(1),
+      'file' => 'deeplink.pages.inc',
+      'type' => MENU_CALLBACK,
+    );
+  }
+ $items[$default_uri . '/%deeplink'] = array( // Define default deeplink menu callback
+    'title callback' => 'deeplink_title',
+    'title arguments' => array(1),
+    'page callback' => 'deeplink',
+    'page arguments' => array(1),
+    'access callback' => 'deeplink_access',
+    'access arguments' => array(1),
+    'file' => 'deeplink.pages.inc',
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/config/deeplink'] = array(
+    'title' => 'Deeplinks',
+    'description' => 'Set-up the various configuration settings for the Deeplink module.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('deeplink_settings'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'deeplink.admin.inc',
+  );
+  $items['admin/config/deeplink/settings'] = array(
+    'title' => 'Settings',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+  );
+  return $items;
+}
+
+/**
+ * Implementation of hook_theme().
+ */
+function _deeplink_theme() {
+  return array(
+    'deeplink' => array(
+      'arguments' => array('deeplink' => NULL, 'style' => 'short'),
+      'file' => 'deeplink.themes.inc',
+    ),
+    'logo-download' => array(
+      'variables' => array('fid' => NULL),
+      'template' => 'download-logo',
+      'path' => drupal_get_path('theme', 'aurora_logos').'/templates',
+    ),
+  );
+}
+

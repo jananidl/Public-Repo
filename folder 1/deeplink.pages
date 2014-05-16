@@ -1,0 +1,182 @@
+<?php
+
+/**
+ * @file
+ * Deep link - Allow direct access to a specific item of content under certain circumstances - admin.
+ */
+
+function deeplink($deeplink) {
+  return theme('logo-download',array('fid' => $deeplink->entity_id,
+                                     'image' => $deeplink->entity,
+                                     'expiretime' => $deeplink->expires,
+                                     ));
+}
+
+function deeplink_node_view_deeplink(&$node) {
+  // Check this is a content type for which we are permitting deeplinking
+  if (!deeplink_valid_type($node->type)) {
+    return;
+  }
+  $uri = deeplink_get_base_uri($entity);
+  $node->content['deeplink_form'] = (arg(0) != $uri) ? drupal_get_form('deeplink_node_view_form', $node) : deeplink_additions($node);
+}
+
+function deeplink_node_view_form($form_state, $build, $node) {
+  // Scan to see if this user is allowed to issue the deeplinks and
+  // that deeplinker is enabled; call the relevant deeplink control.
+  $elements = array();
+  $args = array('node' => &$node);
+  $deeplinkers = array_filter(variable_get(DEEPLINK_ALLOWED_CONTROLS, array()));
+  foreach (controls_get('deeplinkers') as $name => $deeplinker) {
+    if (isset($deeplinkers[$name]) && deeplink_access_deeplinker($deeplinker)) {
+      $elements[$name] = controls_callback('node_view_form', $deeplinker, $args);
+    }
+  }
+
+  if (empty($elements)) {
+    return;
+  }
+
+  return array(
+    '#type' => 'form',
+    '#entity_type' => 'node',
+    '#bundle' => $node->type,
+    '#entity' => $node,
+    'elements' => array(
+      '#type' => 'fieldset',
+      '#title' => t('Click here to send a deeplink'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+
+      'hours_available' => array(
+        '#type' => 'textfield',
+        '#title' => t('Available hours'),
+        '#description' => t('Type the number of hours the deeplink will be available (by default) after which the deeplink will expire (type 0 for one-time login).'),
+        '#default_value' => variable_get(DEEPLINK_APPROVAL_TIME, DEEPLINK_APPROVAL_TIME_DEFAULT),
+      ),
+
+      'deeplinks' => array(
+        '#tree' => TRUE,
+      ) + $elements,
+
+      'email_subject' => array(
+        '#type' => 'textfield',
+        '#title' => t('Notification email subject'),
+        '#description' => t('This is the default email subject to use for notifying individuals about the deeplink. Note that "user" tokens will not work if unregistered users are included in the notifications.'),
+        '#default_value' => variable_get(DEEPLINK_DEFAULT_EMAIL_SUBJECT, DEEPLINK_DEFAULT_EMAIL_SUBJECT_CONTENT),
+        '#required' => TRUE,
+      ),
+
+      'email_body' => array(
+        '#type' => 'textarea',
+        '#title' => t('Notification email body'),
+        '#description' => t('This is the default email body to use for notifying individuals about the deeplink. You can insert replacement [tokens] which are listed below, specialised tokens include [node-deeplink-expires] which is when the deeplink ceases to be available. Note that "user" tokens will not work if unregistered users are included in the notifications.'),
+        '#default_value' => variable_get(DEEPLINK_DEFAULT_EMAIL_BODY, DEEPLINK_DEFAULT_EMAIL_BODY_CONTENT),
+        '#required' => TRUE,
+      ),
+
+      // Display the list of available placeholders if token module is installed.
+      'token_help' => array(
+        '#theme' => module_exists('token') ? 'token_tree' : 'hidden',
+        '#token_types' => array('all'),
+      ),
+
+      'submit' => array(
+        '#type' => 'submit',
+        '#value' => t('Notify deeplink'),
+        '#weight' => 1000,
+      ),
+    ),
+  );
+}
+
+function _deeplink_node_view_form_validate($form, &$form_state) {
+  foreach ($form_state['values']['deeplinks'] as $name => $values) {
+    if ($deeplinker = controls_get('deeplinkers', $name)) {
+      controls_callback('node_view_form_validate', $deeplinker, $values);
+    }
+  }
+}
+
+function _deeplink_node_view_form_submit($form, &$form_state) {
+  // Collect all the uids (and possibly emails) to be notified
+  $uids = array();
+  $expires = strtotime("+{$form_state['values']['hours_available']} hours");
+  foreach ($form_state['values']['deeplinks'] as $name => $values) {
+    if ($deeplinker = controls_get('deeplinkers', $name)) {
+      $people = controls_callback('node_view_form_submit', $deeplinker, $values);
+      if (!empty($people)) {
+        // Build the deeplink and save it
+        $deeplink = (object) array(
+          'control' => $name,
+          'entity_type' => $form['#entity_type'],
+          'bundle' => $form['#bundle'],
+          'entity_id' => $form['#entity']->nid,
+          'expires' => $expires,
+          'data' => $people,
+        );
+        deeplink_write($deeplink);
+        $uids[$deeplink->dlid] = $people;
+      }
+    }
+  }
+
+  // Allow other modules to refine the user list
+  drupal_alter('deeplink_notify_people', $uids);
+
+  foreach ($uids as $dlid => $people) {
+    $args = array(
+      'deeplink' => deeplink_load($dlid),
+      'people' => $people,
+      'email_subject' => $form_state['values']['email_subject'],
+      'email_body' => $form_state['values']['email_body'],
+    );
+    controls_callback('notify_people', controls_get('deeplinkers', $args['deeplink']->control), $args);
+  }
+}
+
+function deeplink_additions($node) {
+  $deeplink = $node->deeplink;
+  if ($deeplink->expires > 0) {
+    $expires_on = token_replace('[deeplink:expires-large]', array('deeplink' => $deeplink)); // MUST FIXME: token is not properly replaced
+    drupal_set_message(t('This page expires on !expires.', array('!expires' => check_plain($expires_on))), 'warning');
+  } else {
+    drupal_set_message(t('This page expires on exit.'), 'warning');
+    // Removes one-time login link
+    db_delete('deeplinks')
+      ->condition('dlid', $deeplink->dlid)
+      ->execute();
+  }
+
+  // Override page title if set different than default
+  if (trim($title = variable_get(DEEPLINK_DEFAULT_PAGE_TITLE, '(default)')) != '(default)') {
+    drupal_set_title($title);
+  }
+  return array();
+}
+
+function deeplink_mail($key, &$message, $params) {
+  $objects = array(
+    'deeplink' => $params['deeplink'],
+    'node' => $params['entity'],
+    'user' => $params['account'],
+  );
+
+  switch ($key) {
+    case 'notify':
+      $message['subject'] = deeplink_token_replace($params['subject'], $objects);
+      $message['body'][] = deeplink_token_replace($params['body'], $objects);
+      break;
+  }
+}
+
+/*
+ * Replace tokens into correct form in e-mail subject and body
+ */
+function deeplink_token_replace($text, $objects) {
+  foreach ($objects as $type => $object) {
+    $text = token_replace($text, array($type => $object));
+  }
+  return $text;
+}
+
